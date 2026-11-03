@@ -116,12 +116,12 @@ def extract_bill(pdf_path: str) -> dict:
 
         # Match phone number (with optional annotation) or "Account"
         # Formats observed:
-        #   (469) 328-8386 Voice $5.15 - - $5.15
-        #   (608) 805-3969 - New Voice $20.99 $29.17 $17.50 - $67.66
-        #   (608) 805-3969 - Old number Voice -$10.44 -$26.25 -$14.50 - -$51.19
-        #   (501) 413-4884 - Removed Voice $2.90 - - $2.90
-        #   (501) 413-4884 - Transferred to T-Mobile Voice $28.00 ...
-        #   (608) 980-2499 - New Wearable $24.29 $0.00 - $24.29
+        #   (555) 555-0100 Voice $5.15 - - $5.15
+        #   (555) 555-0100 - New Voice $20.99 $29.17 $17.50 - $67.66
+        #   (555) 555-0100 - Old number Voice -$10.44 -$26.25 -$14.50 - -$51.19
+        #   (555) 555-0100 - Removed Voice $2.90 - - $2.90
+        #   (555) 555-0100 - Transferred to T-Mobile Voice $28.00 ...
+        #   (555) 555-0100 - New Wearable $24.29 $0.00 - $24.29
         #   Account $81.18 - - $81.18
         #   Totals $273.99 -$7.30 $0.00 $266.69
 

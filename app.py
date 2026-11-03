@@ -4,7 +4,7 @@ Supports both local .duckdb seed and in-app PDF upload.
 Deployable on Streamlit Community Cloud.
 """
 
-import sys, os, io, json, base64
+import sys, os, io, json, base64, html
 import streamlit as st
 import duckdb
 import pandas as pd
@@ -12,11 +12,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from parser import extract_bill, init_schema, load_bill_data, rebuild_dimensions
+from sql_sandbox import UnsafeQueryError, run_readonly_query
 
 # ─── Config ─────────────────────────────────────────────────────────
 
-SEED_DB = os.path.join(os.path.dirname(__file__), "data", "tmobile_bills.duckdb")
-AUTH_DB = os.path.join(os.path.dirname(__file__), "data", "auth.duckdb")
+DATA_DIR = os.environ.get("TMOBILE_DATA_DIR") or os.path.join(os.path.dirname(__file__), "data")
+SEED_DB = os.path.join(DATA_DIR, "tmobile_bills.duckdb")
+AUTH_DB = os.path.join(DATA_DIR, "auth.duckdb")
 
 def _motherduck_token() -> str:
     """Return the MotherDuck token from secrets, or empty string if not set."""
@@ -66,6 +68,43 @@ def _google_auth_enabled() -> bool:
         return False
 
 
+def _auth_settings() -> dict:
+    try:
+        return dict(st.secrets.get("auth_settings", {}))
+    except Exception:
+        return {}
+
+
+def _configured_admins() -> set[str]:
+    """Admin emails from secrets ``[auth_settings] admin_emails``."""
+    raw = _auth_settings().get("admin_emails", [])
+    if isinstance(raw, str):
+        raw = [raw]
+    return {str(e).strip().lower() for e in raw if e and "@" in str(e)}
+
+
+def _allow_anonymous() -> bool:
+    """Explicit opt-in to run without login (local development only)."""
+    return _auth_settings().get("allow_anonymous", False) is True
+
+
+def _sync_configured_admins(con):
+    for admin_email in _configured_admins():
+        con.execute(
+            "INSERT OR IGNORE INTO allowed_users (email, name, role) VALUES (?, ?, 'admin')",
+            [admin_email, admin_email],
+        )
+        con.execute(
+            "UPDATE allowed_users SET role = 'admin' WHERE LOWER(email) = LOWER(?) AND role != 'admin'",
+            [admin_email],
+        )
+
+
+def _clear_login():
+    for k in ["authenticated", "user_email", "display_name", "user_role"]:
+        st.session_state.pop(k, None)
+
+
 def _init_allowed_users_table(con):
     """Create the allowed_users table if it doesn't exist."""
     con.execute("""
@@ -101,7 +140,14 @@ def _get_allowed_user_count(con) -> int:
 def login_gate():
     """Google OAuth login gate with PKCE — blocks access until authenticated."""
     if not _google_auth_enabled():
-        return
+        if _allow_anonymous():
+            return
+        st.error(
+            "Authentication is not configured. Add Google OAuth credentials under "
+            "`[google_auth]` in `.streamlit/secrets.toml`, or set "
+            "`allow_anonymous = true` under `[auth_settings]` for local development."
+        )
+        st.stop()
 
     if st.session_state.get("authenticated"):
         return
@@ -140,10 +186,12 @@ def login_gate():
             if "invalid_grant" in err_body:
                 st.query_params.clear()
                 st.rerun()
-            st.error(f"Token exchange failed: {err_body}")
+            print(f"Google token exchange failed: {err_body}", file=sys.stderr)
+            st.error("Sign-in failed. Please try again.")
             st.stop()
         except Exception as e:
-            st.error(f"Token exchange failed: {e}")
+            print(f"Google token exchange failed: {e}", file=sys.stderr)
+            st.error("Sign-in failed. Please try again.")
             st.stop()
 
         # Decode ID token to get user info (JWT payload)
@@ -163,24 +211,12 @@ def login_gate():
         # Clear the ?code= from URL
         st.query_params.clear()
 
+        if not email or user_info.get("email_verified") not in (True, "true"):
+            st.error("Your Google account email is not verified.")
+            st.stop()
+
         # Check authorization
         con = _get_auth_con()
-        _init_allowed_users_table(con)
-
-        # Ensure permanent admins always exist
-        _PERM_ADMINS = [
-            ("babuganesh2000@gmail.com", "Babu Ganesh"),
-            ("sathishnb4u@gmail.com", "Sathish NB"),
-        ]
-        for pa_email, pa_name in _PERM_ADMINS:
-            con.execute(
-                "INSERT OR IGNORE INTO allowed_users (email, name, role) VALUES (?, ?, 'admin')",
-                [pa_email, pa_name],
-            )
-            con.execute(
-                "UPDATE allowed_users SET role = 'admin' WHERE LOWER(email) = LOWER(?) AND role != 'admin'",
-                [pa_email],
-            )
 
         if _is_user_allowed(con, email):
             st.session_state["authenticated"] = True
@@ -193,7 +229,7 @@ def login_gate():
                 f"""
                 <div style="text-align:center; padding:3rem 0">
                     <h1 style="color:#E20074">🚫 Access Denied</h1>
-                    <p style="font-size:1.1em">Signed in as <b>{email}</b></p>
+                    <p style="font-size:1.1em">Signed in as <b>{html.escape(email)}</b></p>
                     <p>Your email is not in the authorized users list.<br>
                     Please contact the admin to request access.</p>
                 </div>
@@ -201,8 +237,7 @@ def login_gate():
                 unsafe_allow_html=True,
             )
             if st.button("Sign out"):
-                for k in ["authenticated", "user_email", "display_name", "user_role"]:
-                    st.session_state.pop(k, None)
+                _clear_login()
                 st.rerun()
             st.stop()
     else:
@@ -241,8 +276,10 @@ def _get_auth_con():
             _ensure_md_databases()
             con = duckdb.connect(f"md:tmobile_auth?motherduck_token={_motherduck_token()}")
         else:
+            os.makedirs(os.path.dirname(AUTH_DB), exist_ok=True)
             con = duckdb.connect(AUTH_DB)
         _init_allowed_users_table(con)
+        _sync_configured_admins(con)
         st.session_state["auth_con"] = con
     return st.session_state["auth_con"]
 
@@ -254,6 +291,15 @@ login_gate()
 # (nothing — not even the sidebar — should render for unauthenticated visitors)
 if _google_auth_enabled() and not st.session_state.get("authenticated"):
     st.stop()
+
+# Re-check access on every run so removed/demoted users lose access immediately
+if _google_auth_enabled():
+    _auth_con = _get_auth_con()
+    _session_email = st.session_state.get("user_email", "")
+    if not _is_user_allowed(_auth_con, _session_email):
+        _clear_login()
+        st.rerun()
+    st.session_state["user_role"] = _get_user_role(_auth_con, _session_email)
 
 # ─── Session-level DB ───────────────────────────────────────────────
 
@@ -326,12 +372,12 @@ _nav_items += ["Line Analysis", "Line Cost by Month", "Person View"]
 
 # Reports
 _nav_items.append(f"{_SEPARATOR}📑  REPORTS")
-_nav_items += ["Savings & Discounts", "Raw Data Explorer"]
+_nav_items += ["Savings & Discounts"]
 
 # Admin (admin only)
 if _is_admin:
     _nav_items.append(f"{_SEPARATOR}⚙️  ADMIN")
-    _nav_items += ["Balances", "User Management", "Phone Directory"]
+    _nav_items += ["Balances", "User Management", "Phone Directory", "Raw Data Explorer"]
 
 # Render navigation — section headers are styled labels, pages are radio items
 # We use a callback-driven approach with buttons for headers, radio for pages
@@ -1565,18 +1611,25 @@ elif page == "Savings & Discounts":
 
 elif page == "Raw Data Explorer":
     st.title("Raw Data Explorer")
-    st.markdown("Run any SQL query against the DuckDB database.")
+
+    if st.session_state.get("user_role") != "admin":
+        st.error("Admin access required.")
+        st.stop()
+
+    st.markdown("Run a read-only `SELECT` query against a sandboxed copy of the database.")
 
     default_sql = "SELECT * FROM invoices ORDER BY bill_date"
     sql = st.text_area("SQL Query", value=default_sql, height=120)
 
     if st.button("Run Query", type="primary"):
         try:
-            result = run_query(sql)
+            result = run_readonly_query(get_con(), sql)
             st.success(f"{len(result)} rows returned")
             st.dataframe(result, width='stretch', hide_index=True)
             csv = result.to_csv(index=False)
             st.download_button("Download CSV", csv, "query_result.csv", "text/csv")
+        except UnsafeQueryError as e:
+            st.error(str(e))
         except Exception as e:
             st.error(f"Query error: {e}")
 
@@ -1614,7 +1667,7 @@ elif page == "User Management":
         st.stop()
 
     # Permanent admins — cannot be removed or demoted
-    PERMANENT_ADMINS = {"babuganesh2000@gmail.com", "sathishnb4u@gmail.com"}
+    PERMANENT_ADMINS = _configured_admins()
 
     auth_con = _get_auth_con()
     _init_allowed_users_table(auth_con)
@@ -1639,7 +1692,7 @@ elif page == "User Management":
 
     # ── Add User ───────────────────────────────────────────────────
     st.subheader("Add User")
-    st.caption("New users are always added as **viewer** (read-only). Only permanent admins have admin access.")
+    st.caption("New users are always added as **viewer** (read-only). Admins are configured in secrets under `[auth_settings] admin_emails`.")
     with st.form("add_user_form", clear_on_submit=True):
         col1, col2 = st.columns([2, 2])
         new_email = col1.text_input("Gmail / Google email", placeholder="user@gmail.com")
@@ -1868,20 +1921,20 @@ elif page == "Balances":
         members_rows = ""
         for _, md in mem_detail.iterrows():
             members_rows += f"""<tr>
-                <td style="padding:5px;border:1px solid #ddd">{md['person_label']}</td>
-                <td style="padding:5px;border:1px solid #ddd">{md['phone_number']}</td>
-                <td style="padding:5px;border:1px solid #ddd">{md['relationship']}</td>
+                <td style="padding:5px;border:1px solid #ddd">{html.escape(str(md['person_label']))}</td>
+                <td style="padding:5px;border:1px solid #ddd">{html.escape(str(md['phone_number']))}</td>
+                <td style="padding:5px;border:1px solid #ddd">{html.escape(str(md['relationship']))}</td>
                 <td style="padding:5px;border:1px solid #ddd;text-align:right">${md['month_total']:,.2f}</td>
             </tr>"""
 
         notes_html = (f'<div style="background:#FFFDE7;padding:12px;border-left:4px solid #FFB900;'
-                      f'margin:16px 0"><strong>Note:</strong> {notes}</div>'
+                      f'margin:16px 0"><strong>Note:</strong> {html.escape(notes)}</div>'
                       if notes.strip() else "")
 
         html_body = f"""
         <div style="font-family:Arial,sans-serif;max-width:650px;margin:auto">
           <h2 style="color:#E20074">T-Mobile Bill Summary</h2>
-          <p>Hi <strong>{em_name}</strong>,</p>
+          <p>Hi <strong>{html.escape(str(em_name))}</strong>,</p>
           <p>Here is your T-Mobile bill share for <strong>{', '.join(months)}</strong>:</p>
           {notes_html}
           <h3 style="color:#333">Monthly Breakdown</h3>
@@ -1910,7 +1963,7 @@ elif page == "Balances":
             </tr>
             {members_rows}
           </table>
-          <p style="margin-top:16px">Please reach out to <strong>{_ADMIN_LABEL}</strong> for payment details.</p>
+          <p style="margin-top:16px">Please reach out to <strong>{html.escape(str(_ADMIN_LABEL))}</strong> for payment details.</p>
           <p style="color:#888;font-size:12px">Sent from <a href="{_APP_URL}">T-Mobile Bill Tracker</a></p>
         </div>"""
 
@@ -2525,20 +2578,20 @@ elif page == "Balances":
                         members_rows = ""
                         for _, md in mem_detail.iterrows():
                             members_rows += f"""<tr>
-                                <td style="padding:5px;border:1px solid #ddd">{md['person_label']}</td>
-                                <td style="padding:5px;border:1px solid #ddd">{md['phone_number']}</td>
-                                <td style="padding:5px;border:1px solid #ddd">{md['relationship']}</td>
+                                <td style="padding:5px;border:1px solid #ddd">{html.escape(str(md['person_label']))}</td>
+                                <td style="padding:5px;border:1px solid #ddd">{html.escape(str(md['phone_number']))}</td>
+                                <td style="padding:5px;border:1px solid #ddd">{html.escape(str(md['relationship']))}</td>
                                 <td style="padding:5px;border:1px solid #ddd;text-align:right">${md['month_total']:,.2f}</td>
                             </tr>"""
 
                         notes_html = (f'<div style="background:#FFFDE7;padding:12px;border-left:4px solid #FFB900;'
-                                      f'margin:16px 0"><strong>Note:</strong> {em_notes}</div>'
+                                      f'margin:16px 0"><strong>Note:</strong> {html.escape(em_notes)}</div>'
                                       if em_notes.strip() else "")
 
                         html_body = f"""
                         <div style="font-family:Arial,sans-serif;max-width:650px;margin:auto">
                           <h2 style="color:#E20074">T-Mobile Bill Summary</h2>
-                          <p>Hi <strong>{em_name}</strong>,</p>
+                          <p>Hi <strong>{html.escape(str(em_name))}</strong>,</p>
                           <p>Here is your T-Mobile bill share for <strong>{', '.join(em_months)}</strong>:</p>
                           {notes_html}
                           <h3 style="color:#333">Monthly Breakdown</h3>
@@ -2567,7 +2620,7 @@ elif page == "Balances":
                             </tr>
                             {members_rows}
                           </table>
-                          <p style="margin-top:16px">Please reach out to <strong>{_ADMIN_LABEL}</strong> for payment details.</p>
+                          <p style="margin-top:16px">Please reach out to <strong>{html.escape(str(_ADMIN_LABEL))}</strong> for payment details.</p>
                           <p style="color:#888;font-size:12px">Sent from <a href="{_APP_URL}">T-Mobile Bill Tracker</a></p>
                         </div>"""
 
@@ -2613,7 +2666,7 @@ elif page == "Balances":
                             for _, sr in ms_df.iterrows():
                                 bg = ' style="background:#FFF0F5"' if sr["Balance"] > 0 else ""
                                 rows_h += f"""<tr{bg}>
-                                    <td style="padding:6px;border:1px solid #ddd">{sr['Account']}</td>
+                                    <td style="padding:6px;border:1px solid #ddd">{html.escape(str(sr['Account']))}</td>
                                     <td style="padding:6px;border:1px solid #ddd;text-align:right">${sr['Owed']:,.2f}</td>
                                     <td style="padding:6px;border:1px solid #ddd;text-align:right">${sr['Paid']:,.2f}</td>
                                     <td style="padding:6px;border:1px solid #ddd;text-align:right;font-weight:bold">${sr['Balance']:,.2f}</td>
@@ -2621,7 +2674,7 @@ elif page == "Balances":
                             ms_html = f"""
                             <div style="font-family:Arial,sans-serif;max-width:650px;margin:auto">
                               <h2 style="color:#E20074">T-Mobile Bill – Master Summary</h2>
-                              <p>Hi <strong>{_ADMIN_LABEL}</strong>,</p>
+                              <p>Hi <strong>{html.escape(str(_ADMIN_LABEL))}</strong>,</p>
                               <p>Balance summary for <strong>{', '.join(ms_months)}</strong>:</p>
                               <table style="border-collapse:collapse;width:100%">
                                 <tr style="background:#E20074;color:white">
