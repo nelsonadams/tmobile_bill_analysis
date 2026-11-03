@@ -57,14 +57,14 @@ def extract_usage(pdf) -> dict:
         text = pdf.pages[page_idx].extract_text() or ""
         events = []
 
-        # Phone headers: "(469) 328-8386 Jan 24 - Feb 23"
+        # Phone headers: "(555) 555-0100 Jan 24 - Feb 23"
         for m in re.finditer(
             r"\((\d{3})\)\s*(\d{3}-\d{4})\s+\w+ \d+\s*-\s*\w+ \d+", text
         ):
             phone = f"({m.group(1)}) {m.group(2)}"
             events.append((m.start(), "header", phone, None))
 
-        # CONTINUED markers: "CONTINUED - (469) 328-8386 , TALK"
+        # CONTINUED markers: "CONTINUED - (555) 555-0100 , TALK"
         for m in re.finditer(
             r"CONTINUED\s*-\s*\((\d{3})\)\s*(\d{3}-\d{4})\s*,\s*(\w+)", text
         ):

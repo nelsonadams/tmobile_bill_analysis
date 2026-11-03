@@ -35,20 +35,8 @@ def _pd(text: str) -> str:
 
 # ─── Phone-to-Name mapping ──────────────────────────────────────────
 
-PHONE_NAMES = {
-    "(501) 413-4884": "Sathish",
-    "(469) 328-8386": "Ganesh",
-    "(469) 859-9780": "Ramya",
-    "(501) 413-4892": "Sathya",
-    "(608) 622-3521": "Parthiban",
-    "(608) 609-3416": "Dharshana",
-    "(608) 770-2157": "Milan Kumar",
-    "(224) 770-0757": "Prince",
-    "(608) 207-8787": "Deepika",
-    "(224) 572-1750": "Sujitha",
-    "(501) 249-7415": "Mani",
-    "(331) 707-6438": "Meena",
-}
+# Phone → person names are managed in the app's Phone Directory page (phone_names table).
+PHONE_NAMES: dict[str, str] = {}
 
 
 # ─── DDL ────────────────────────────────────────────────────────────

@@ -71,7 +71,31 @@ Open http://localhost:8501 and navigate to **Upload Bills** to add your PDFs.
 3. Click **New app** → select this repo → set main file to `app.py`
 4. Deploy!
 
-The app ships with a pre-loaded seed database (`data/tmobile_bills.duckdb`) so the dashboard works immediately. Upload additional PDFs through the UI.
+Configure secrets in the Streamlit Cloud dashboard (see **Configuration** below). Use MotherDuck for persistent storage; local DuckDB files under `data/` are created at runtime and never committed.
+
+## Configuration
+
+`.streamlit/secrets.toml` (gitignored):
+
+```toml
+[google_auth]
+client_id = "..."
+client_secret = "..."
+redirect_uri = "https://your-app.streamlit.app"
+
+[auth_settings]
+admin_emails = ["you@example.com"]  # always admins; cannot be removed in the UI
+# allow_anonymous = true            # local development only: run without login (viewer access)
+
+[motherduck]                          # optional
+token = "..."
+
+[gmail_smtp]                          # optional, for Balances emails
+username = "..."
+app_password = "..."
+```
+
+The app refuses to start without `[google_auth]` unless `allow_anonymous = true` is set. The Raw Data Explorer is admin-only and runs single `SELECT` statements against an in-memory copy of the data with file access disabled.
 
 ## Project Structure
 
@@ -81,8 +105,9 @@ The app ships with a pre-loaded seed database (`data/tmobile_bills.duckdb`) so t
 ├── load_bills.py             # CLI tool for batch-loading PDFs
 ├── export_xlsx.py            # Export DB to formatted Excel workbook
 ├── redact_screenshots.py     # Blur/grey personal info in screenshots
-├── data/
-│   └── tmobile_bills.duckdb  # Seed database (empty for cloud deploy)
+├── sql_sandbox.py            # Read-only sandbox for the Raw Data Explorer
+├── tests/                    # pytest suite (run: python -m pytest tests)
+├── data/                     # Local DuckDB files (created at runtime, gitignored)
 ├── screenshots/              # App screenshots (redacted)
 │   ├── 01_login.png
 │   ├── 02_upload.png

@@ -10,11 +10,9 @@ build/
 # Sensitive billing PDFs (do NOT commit)
 *.pdf
 
-# Working copies of DB (seed DB in data/ IS committed)
-/*.duckdb
+# Databases (billing data is personal — never commit it)
+*.duckdb
 *.duckdb.wal
-!data/tmobile_bills.duckdb
-!data/auth.duckdb
 
 # Excel exports
 *.xlsx
